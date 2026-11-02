@@ -26,9 +26,10 @@ extends Node
 ##                 property (moving / rotating / scaling a node, editing a
 ##                 value) is keyed at the playhead straight away, like
 ##                 Blender's auto keying. Properties are keyed when they
-##                 already have a track, and a selected 3D node's position,
-##                 rotation or scale gets a new track when it has none yet
-##                 (other properties never create tracks). Undo once to remove the key, twice to undo
+##                 already have a track, and a selected 3D node that the
+##                 animation already animates gets a new position, rotation
+##                 or scale track when that part has none yet (other
+##                 properties and unanimated nodes never create tracks). Undo once to remove the key, twice to undo
 ##                 the change too.
 ## Keys land on an existing key when the playhead is within half a frame of
 ## it (so they replace it rather than adding one next to it).
@@ -1814,6 +1815,16 @@ func _jobs_for_new_transform_tracks(anim: Animation, root: Node, player: Node, j
 		if n != root and not root.is_ancestor_of(n):
 			continue
 		var np := root.get_path_to(n)
+		# Only nodes this animation already animates (a joint with rotation
+		# keys gets a position track); helpers it never touched (IK targets,
+		# cameras, props) are left alone.
+		var animated := false
+		for i in anim.get_track_count():
+			if anim.track_get_path(i).get_concatenated_names() == np.get_concatenated_names():
+				animated = true
+				break
+		if not animated:
+			continue
 		var was: Array = _auto_snap[id]
 		var now := [n.position, n.quaternion, n.scale]
 		var types := [Animation.TYPE_POSITION_3D, Animation.TYPE_ROTATION_3D, Animation.TYPE_SCALE_3D]
