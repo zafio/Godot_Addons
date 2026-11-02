@@ -1240,13 +1240,17 @@ static func _key_time(anim: Animation, t: float) -> float:
 	var best := t
 	var dist := half
 	for i in anim.get_track_count():
+		# (FIND_MODE_NEAREST gives the last key at or before t, so the key
+		# just after t is checked too: the time box rounds to 0.0001 s, which
+		# puts the playhead a hair before a key at a third of a second.)
 		var k := anim.track_find_key(i, t, Animation.FIND_MODE_NEAREST)
-		if k < 0:
-			continue
-		var kt := anim.track_get_key_time(i, k)
-		if absf(kt - t) < dist:
-			dist = absf(kt - t)
-			best = kt
+		for j in [k, k + 1]:
+			if j < 0 or j >= anim.track_get_key_count(i):
+				continue
+			var kt := anim.track_get_key_time(i, j)
+			if absf(kt - t) < dist:
+				dist = absf(kt - t)
+				best = kt
 	return best
 
 
