@@ -8,4 +8,4 @@
 | [SuperScrubber](super_scrubber) | 1.2 | Blender-style Animation dock scrubbing: G to scrub, G or F to key, Space/F + wheel to change key values, Q/E to jump between keyframes. |
 | [UV Island Animator](uv_island_animator_v1_0/addons/uv_island_animator) | 1.0.0 | Animate individual UV islands independently with AnimationPlayer. |
 | [Vfov Slider](VFOV_Slider) | 2.0 | Adds a viewport toolbar slider to adjust the camera's vertical FOV. |
-| [View Pie](view_pie/addons/view_pie) | 1.1.0 | Hold-Z pie menu for 3D viewport display modes and overlays; Alt+Z reverts. Requires Godot 4.6+. |
+| [View Pie](view_pie) | 1.1.0 | Hold-Z pie menu for 3D viewport display modes and overlays; Alt+Z reverts. Requires Godot 4.6+. |
