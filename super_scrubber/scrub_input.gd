@@ -23,8 +23,10 @@ extends Node
 ##                 change you make in the viewport or Inspector to an animated
 ##                 property (moving / rotating / scaling a node, editing a
 ##                 value) is keyed at the playhead straight away, like
-##                 Blender's auto keying. Only properties that already have a
-##                 track are keyed. Undo once to remove the key, twice to undo
+##                 Blender's auto keying. Properties are keyed when they
+##                 already have a track, and a selected 3D node's position,
+##                 rotation or scale gets a new track when it has none yet
+##                 (other properties never create tracks). Undo once to remove the key, twice to undo
 ##                 the change too.
 ## Keys land on an existing key when the playhead is within half a frame of
 ## it (so they replace it rather than adding one next to it).
@@ -110,6 +112,11 @@ var _auto_btn: Button
 var _auto_history: UndoRedo
 var _auto_version := -1
 var _auto_pending := false
+## Auto Key: the selected 3D nodes' position / rotation / scale as they were
+## before the change being keyed (instance id -> [position, quaternion, scale]),
+## to tell which untracked ones the change moved.
+var _auto_snap := {}
+var _auto_snap_refresh := false
 var _committing := false
 var _time_regex := RegEx.create_from_string("(-?[0-9]+(?:[.,][0-9]+)?)\\s*$")
 
@@ -122,6 +129,7 @@ func _ready() -> void:
 		inspector.property_edited.connect(_on_property_edited)
 		inspector.edited_object_changed.connect(_on_inspector_object_changed)
 		_inspector_connected = true
+	EditorInterface.get_selection().selection_changed.connect(_on_selection_changed)
 
 
 func shutdown() -> void:
@@ -138,6 +146,8 @@ func shutdown() -> void:
 	if is_instance_valid(_auto_btn):
 		_auto_btn.queue_free()
 	_watch_history(null)
+	if EditorInterface.get_selection().selection_changed.is_connected(_on_selection_changed):
+		EditorInterface.get_selection().selection_changed.disconnect(_on_selection_changed)
 
 
 # ---------------------------------------------------------------------------
@@ -1252,6 +1262,11 @@ func _build_key_plan(t: float, auto: bool = false) -> Dictionary:
 			used[i] = true
 			jobs.append({"track": i, "type": anim.track_get_type(i), "value": cur})
 
+	# 2b. Auto Key: a selected node's untracked position / rotation / scale
+	#     that the change moved gets a new track.
+	if auto:
+		_jobs_for_new_transform_tracks(anim, root, player, jobs, used)
+
 	# 3. Fallback: all tracks of selected nodes.
 	if jobs.is_empty() and not auto:
 		var selected := EditorInterface.get_selection().get_selected_nodes()
@@ -1567,6 +1582,10 @@ func _auto_key_tick() -> void:
 	if _auto_pending:
 		_auto_pending = false
 		_auto_key_now()
+		_auto_snap_refresh = true
+	if _auto_snap_refresh:
+		_auto_snap_refresh = false
+		_take_auto_snap(true)
 
 
 func _watch_history(history: UndoRedo) -> void:
@@ -1589,6 +1608,8 @@ func _on_history_version() -> void:
 	_auto_version = v
 	if fresh and _auto_key and not _committing:
 		_auto_pending = true
+	else:
+		_auto_snap_refresh = true # undo / redo: start again from what's there
 
 
 func _auto_key_now() -> void:
@@ -1632,6 +1653,46 @@ func _set_auto_key(on: bool) -> void:
 		_auto_btn.set_pressed_no_signal(on)
 	if is_instance_valid(_auto_history):
 		_auto_version = _auto_history.get_version()
+	_take_auto_snap(true)
+
+
+## Remembers the selected 3D nodes' transform parts. `all` = every selected
+## node again; otherwise only newly selected ones (on a click, before any drag
+## moves them: a click-and-drag selects and moves before the next frame).
+func _take_auto_snap(all: bool) -> void:
+	var keep := {}
+	for n in EditorInterface.get_selection().get_selected_nodes():
+		var n3 := n as Node3D
+		if n3 == null:
+			continue
+		var id := n3.get_instance_id()
+		keep[id] = [n3.position, n3.quaternion, n3.scale] if all or not _auto_snap.has(id) else _auto_snap[id]
+	_auto_snap = keep
+
+
+func _on_selection_changed() -> void:
+	if _auto_key:
+		_take_auto_snap(false)
+
+
+## Auto Key on a selected 3D node whose position / rotation / scale changed
+## but has no track yet: that track is created (like Blender's auto keying).
+func _jobs_for_new_transform_tracks(anim: Animation, root: Node, player: Node, jobs: Array, used: Dictionary) -> void:
+	for id in _auto_snap:
+		var n := instance_from_id(id) as Node3D
+		if n == null or not is_instance_valid(n) or n == player:
+			continue
+		if n != root and not root.is_ancestor_of(n):
+			continue
+		var np := root.get_path_to(n)
+		var was: Array = _auto_snap[id]
+		var now := [n.position, n.quaternion, n.scale]
+		var types := [Animation.TYPE_POSITION_3D, Animation.TYPE_ROTATION_3D, Animation.TYPE_SCALE_3D]
+		var props := ["position", "quaternion", "scale"]
+		for c in 3:
+			if anim.find_track(np, types[c]) >= 0 or _values_equal(now[c], was[c]):
+				continue
+			_jobs_for_edit(anim, root, n, props[c], jobs, used)
 
 
 func _toast(msg: String, severity: int) -> void:
