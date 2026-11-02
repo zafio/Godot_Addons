@@ -64,6 +64,7 @@ var _native_drag := false
 var _drag_vp: Viewport
 var _drag_y := 0.0
 var _drag_last_pos = null
+var _pushing_drag := false
 
 # Properties edited in the Inspector since the last seek/key: [{id, prop}]
 var _pending_edits: Array = []
@@ -286,6 +287,12 @@ func _can_handle() -> bool:
 
 
 func _input(event: InputEvent) -> void:
+	# During a G drag the playhead follows one position per frame, sampled from
+	# the live cursor. Real motion events lag behind it, so letting them through
+	# too would seek twice a frame and pull the playhead back and forth.
+	if _native_drag and not _pushing_drag and event is InputEventMouseMotion:
+		get_viewport().set_input_as_handled()
+		return
 	var mb := event as InputEventMouseButton
 	if mb:
 		if _handle_wheel(mb):
@@ -414,7 +421,7 @@ func _process(_delta: float) -> void:
 		_f_down = false
 	# Keep selection-mirror signal connections on (rebuilt) track rows.
 	var now := Time.get_ticks_msec()
-	if now - _rows_check_ms > 250:
+	if now - _rows_check_ms > 250 and not _g_down:
 		_rows_check_ms = now
 		_watch_rows()
 
@@ -464,8 +471,8 @@ func _g_release(allow_tap: bool) -> void:
 
 
 ## Starts the timeline's native scrub drag with a synthetic left-button press.
-## Real mouse motion then goes to the timeline (it holds mouse focus) exactly as
-## during a normal LMB drag.
+## The timeline then holds mouse focus as during a normal LMB drag, and
+## _native_drag_motion feeds it the cursor position once per frame.
 func _begin_native_drag() -> bool:
 	var vp := _timeline.get_viewport()
 	if vp == null:
@@ -514,7 +521,9 @@ func _native_drag_motion() -> void:
 	var mm := InputEventMouseMotion.new()
 	mm.position = p
 	mm.global_position = p
+	_pushing_drag = true
 	_drag_vp.push_input(mm, true)
+	_pushing_drag = false
 
 
 func _end_native_drag() -> void:
