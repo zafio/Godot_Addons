@@ -16,6 +16,9 @@ extends Node
 ##   Q / E         jump the playhead to the previous / next keyframe of the
 ##                 selected track or keys, else of the selected node(s), else
 ##                 of the whole animation. Hold to keep stepping.
+##   Ctrl+F        show only the tracks of the nodes selected in the viewport
+##                 or Scene tree (Godot's own filter button, toggled); press
+##                 again to show all tracks.
 ##   Auto Key      (the red-dot button next to "Add Track") while on, every
 ##                 change you make in the viewport or Inspector to an animated
 ##                 property (moving / rotating / scaling a node, editing a
@@ -58,6 +61,7 @@ var _btn_play_from: Button
 var _add_track_hb: Control
 var _add_track_btn: Control
 var _filter_edit: Control
+var _sel_filter_btn: Button
 var _len_hb: Control
 
 var _attached := false
@@ -321,6 +325,9 @@ func _input(event: InputEvent) -> void:
 	var k := event as InputEventKey
 	if k == null:
 		return
+	if k.keycode == KEY_F and k.ctrl_pressed:
+		_handle_selected_filter(k)
+		return
 	if k.keycode == KEY_F:
 		_handle_f(k)
 		return
@@ -365,6 +372,36 @@ func _handle_f(k: InputEventKey) -> void:
 		_f_down = false
 		if not _f_used_wheel and _nodes_ok():
 			_insert_keys()
+
+
+## Ctrl+F: the track editor's own "Only show tracks from nodes selected in
+## tree" toggle (it follows the viewport selection too, which is the editor's).
+func _handle_selected_filter(k: InputEventKey) -> void:
+	if not k.pressed or k.echo or _g_down or _f_down:
+		return
+	if k.alt_pressed or k.meta_pressed or k.shift_pressed:
+		return
+	if not _can_handle():
+		return
+	var btn := _selected_filter_button()
+	if btn == null:
+		return
+	get_viewport().set_input_as_handled()
+	btn.button_pressed = not btn.button_pressed
+	btn.pressed.emit() # the editor rebuilds the track list on "pressed"
+	_toast("Tracks: selected nodes only" if btn.button_pressed else "Tracks: all", 0)
+
+
+func _selected_filter_button() -> Button:
+	if is_instance_valid(_sel_filter_btn):
+		return _sel_filter_btn
+	var icon := EditorInterface.get_editor_theme().get_icon(&"AnimationFilter", &"EditorIcons")
+	for b in _find_all(_track_editor, "Button"):
+		var btn := b as Button
+		if btn.toggle_mode and btn.icon == icon:
+			_sel_filter_btn = btn
+			return btn
+	return null
 
 
 ## Q / E: echo is allowed, so holding the key walks through the keyframes.
