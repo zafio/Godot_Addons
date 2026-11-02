@@ -17,8 +17,10 @@ extends Node
 ##                 selected track or keys, else of the selected node(s), else
 ##                 of the whole animation. Hold to keep stepping.
 ##   Ctrl+F        show only the tracks of the nodes selected in the viewport
-##                 or Scene tree (Godot's own filter button, toggled); press
-##                 again to show all tracks.
+##                 or Scene tree (also the filter button next to Auto Key);
+##                 press again to show all tracks. Clicking a key keeps the
+##                 list (Godot's own filter emptied it, since the key in the
+##                 Inspector clears the node selection).
 ##   Auto Key      (the red-dot button next to "Add Track") while on, every
 ##                 change you make in the viewport or Inspector to an animated
 ##                 property (moving / rotating / scaling a node, editing a
@@ -64,6 +66,14 @@ var _add_track_hb: Control
 var _add_track_btn: Control
 var _filter_edit: Control
 var _sel_filter_btn: Button
+# Ctrl+F filter (ours): on, the nodes whose tracks show, our toggle button,
+# rows' track paths (row instance id -> path) and the rows / groups we hid.
+var _sel_filter := false
+var _sel_filter_ids := {}
+var _filter_btn: Button
+var _row_paths := {}
+var _hidden_rows := {}
+var _find_ms := 0
 var _len_hb: Control
 
 var _attached := false
@@ -145,6 +155,9 @@ func shutdown() -> void:
 		_hud.queue_free()
 	if is_instance_valid(_auto_btn):
 		_auto_btn.queue_free()
+	if is_instance_valid(_filter_btn):
+		_filter_btn.queue_free()
+	_clear_sel_filter()
 	_watch_history(null)
 	if EditorInterface.get_selection().selection_changed.is_connected(_on_selection_changed):
 		EditorInterface.get_selection().selection_changed.disconnect(_on_selection_changed)
@@ -384,8 +397,11 @@ func _handle_f(k: InputEventKey) -> void:
 			_insert_keys()
 
 
-## Ctrl+F: the track editor's own "Only show tracks from nodes selected in
-## tree" toggle (it follows the viewport selection too, which is the editor's).
+## Ctrl+F: show only the tracks of the selected nodes. Our own filter, not
+## Godot's "Only show tracks from nodes selected in tree" button: clicking a
+## key puts it in the Inspector, which clears the node selection, and Godot's
+## filter then hid every track (and lost the key selection with them). Ours
+## keeps the last non-empty selection.
 func _handle_selected_filter(k: InputEventKey) -> void:
 	if not k.pressed or k.echo or _g_down or _f_down:
 		return
@@ -393,13 +409,101 @@ func _handle_selected_filter(k: InputEventKey) -> void:
 		return
 	if not _can_handle():
 		return
-	var btn := _selected_filter_button()
-	if btn == null:
-		return
 	get_viewport().set_input_as_handled()
-	btn.button_pressed = not btn.button_pressed
-	btn.pressed.emit() # the editor rebuilds the track list on "pressed"
-	_toast("Tracks: selected nodes only" if btn.button_pressed else "Tracks: all", 0)
+	_set_sel_filter(not _sel_filter)
+
+
+func _set_sel_filter(on: bool) -> void:
+	if on:
+		var ids := _selected_ids()
+		if ids.is_empty():
+			_toast("SuperScrubber: select the nodes whose tracks you want to see first.", 1)
+			on = false
+		else:
+			_sel_filter_ids = ids
+			# Godot's own filter would fight ours.
+			var gb := _selected_filter_button()
+			if gb and gb.button_pressed:
+				gb.button_pressed = false
+				gb.pressed.emit()
+	_sel_filter = on
+	if is_instance_valid(_filter_btn) and _filter_btn.button_pressed != on:
+		_filter_btn.set_pressed_no_signal(on)
+	if on:
+		_apply_sel_filter()
+	else:
+		_clear_sel_filter()
+	_toast("Tracks: selected nodes only" if on else "Tracks: all", 0)
+
+
+func _selected_ids() -> Dictionary:
+	var ids := {}
+	for n in EditorInterface.get_selection().get_selected_nodes():
+		ids[n.get_instance_id()] = true
+	return ids
+
+
+## Hides the rows (and node groups) of tracks whose node isn't in the filter.
+## Run every frame while on: the editor rebuilds its rows now and then.
+func _apply_sel_filter() -> void:
+	if not _nodes_ok():
+		return
+	var player := _find_player()
+	if player == null:
+		return
+	var root := player.get_node_or_null(player.root_node)
+	var anim := player.get_animation(player.assigned_animation)
+	if root == null or anim == null:
+		return
+	var paths := {}
+	for i in anim.get_track_count():
+		paths[str(anim.track_get_path(i))] = true
+	var nl := _name_limit()
+	var groups := {}
+	var live := {}
+	for r: Control in _find_all(_track_editor, "AnimationTrackEdit"):
+		var rid := r.get_instance_id()
+		live[rid] = true
+		var p: String = _row_paths.get(rid, "")
+		if p == "" or not paths.has(p):
+			p = _row_path(r, paths, nl) if r.size.y > 0.0 else ""
+			if p == "":
+				continue # not laid out yet: next frame
+			_row_paths[rid] = p
+		var node := root.get_node_or_null(NodePath(NodePath(p).get_concatenated_names()))
+		var keep := node != null and _sel_filter_ids.has(node.get_instance_id())
+		_hide_row(r, not keep)
+		var g := r.get_parent()
+		for c in g.get_children():
+			if c.get_class() == "AnimationTrackEditGroup":
+				groups[g] = groups.get(g, false) or keep
+				break
+	for g: Control in groups:
+		_hide_row(g, not groups[g])
+	if _row_paths.size() > live.size() * 2 + 64:
+		for rid in _row_paths.keys():
+			if not live.has(rid):
+				_row_paths.erase(rid)
+
+
+## Hides `c` or shows it again, only undoing what we hid ourselves.
+func _hide_row(c: Control, off: bool) -> void:
+	var id := c.get_instance_id()
+	if off:
+		if c.visible:
+			c.visible = false
+			_hidden_rows[id] = true
+	elif _hidden_rows.has(id):
+		_hidden_rows.erase(id)
+		c.visible = true
+
+
+func _clear_sel_filter() -> void:
+	for id in _hidden_rows:
+		var c := instance_from_id(id) as Control
+		if c and is_instance_valid(c):
+			c.visible = true
+	_hidden_rows.clear()
 
 
 func _selected_filter_button() -> Button:
@@ -486,7 +590,14 @@ func _process(_delta: float) -> void:
 		_hud.hide()
 	if _f_down and not Input.is_key_pressed(KEY_F):
 		_f_down = false
+	# Find the Animation panel's controls on our own (the Auto Key and filter
+	# buttons used to appear only after the first G / F / Q / E over it).
+	if not _nodes_ok() and Time.get_ticks_msec() - _find_ms > 500:
+		_find_ms = Time.get_ticks_msec()
+		_ensure_nodes()
 	_auto_key_tick()
+	if _sel_filter:
+		_apply_sel_filter()
 	# Keep selection-mirror signal connections on (rebuilt) track rows.
 	var now := Time.get_ticks_msec()
 	if now - _rows_check_ms > 250 and not _g_down:
@@ -1643,6 +1754,18 @@ func _add_auto_button() -> void:
 	_auto_btn.toggled.connect(_set_auto_key)
 	_add_track_hb.add_child(_auto_btn)
 	_add_track_hb.move_child(_auto_btn, 0)
+	if is_instance_valid(_filter_btn):
+		_filter_btn.queue_free()
+	_filter_btn = Button.new()
+	_filter_btn.name = "SuperScrubberSelectedFilter"
+	_filter_btn.toggle_mode = true
+	_filter_btn.flat = true
+	_filter_btn.icon = EditorInterface.get_editor_theme().get_icon(&"AnimationFilter", &"EditorIcons")
+	_filter_btn.tooltip_text = "Show only the tracks of the selected nodes (SuperScrubber, Ctrl+F over the panel). Clicking a key keeps the list; select other nodes to change it."
+	_filter_btn.button_pressed = _sel_filter
+	_filter_btn.toggled.connect(_set_sel_filter)
+	_add_track_hb.add_child(_filter_btn)
+	_add_track_hb.move_child(_filter_btn, 1)
 
 
 func _set_auto_key(on: bool) -> void:
@@ -1673,6 +1796,12 @@ func _take_auto_snap(all: bool) -> void:
 func _on_selection_changed() -> void:
 	if _auto_key:
 		_take_auto_snap(false)
+	# An empty selection (a key clicked into the Inspector, or a click on
+	# nothing) keeps the filter as it was.
+	if _sel_filter:
+		var ids := _selected_ids()
+		if not ids.is_empty():
+			_sel_filter_ids = ids
 
 
 ## Auto Key on a selected 3D node whose position / rotation / scale changed
