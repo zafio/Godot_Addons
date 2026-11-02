@@ -1233,24 +1233,47 @@ func _build_key_plan(t: float, auto: bool = false) -> Dictionary:
 	return {"anim": anim, "t": key_t, "jobs": jobs}
 
 
-## The time keys go to: an existing key's time when one is within half a
-## frame of `t` (the animation's step, or 1/60 s), else `t`.
+static func _half_frame(anim: Animation) -> float:
+	return (anim.step if anim.step > 0.0 else 1.0 / 30.0) * 0.5
+
+
+## Track `i`'s key within half a frame of `t`, or -1. Of several (duplicates),
+## the one nearest a whole frame of the animation's step, i.e. the original.
+static func _near_key(anim: Animation, i: int, t: float) -> int:
+	var half := _half_frame(anim)
+	var step := half * 2.0
+	var best := -1
+	var best_off := INF
+	var k0 := anim.track_find_key(i, t - half, Animation.FIND_MODE_NEAREST)
+	for j in range(maxi(k0, 0), anim.track_get_key_count(i)):
+		var kt := anim.track_get_key_time(i, j)
+		if kt > t + half:
+			break
+		if absf(kt - t) >= half:
+			continue
+		var off := absf(kt / step - roundf(kt / step)) * step
+		if off < best_off - 1e-7 or (absf(off - best_off) <= 1e-7 and absf(kt - t) < absf(anim.track_get_key_time(i, best) - t)):
+			best = j
+			best_off = off
+	return best
+
+
+## The time new keys go to: an existing key's time when one is within half a
+## frame of `t` (the animation's step, or 1/60 s), preferring a key on a whole
+## frame (an original over a stray duplicate), else `t`.
 static func _key_time(anim: Animation, t: float) -> float:
-	var half := (anim.step if anim.step > 0.0 else 1.0 / 30.0) * 0.5
+	var step := _half_frame(anim) * 2.0
 	var best := t
-	var dist := half
+	var best_off := INF
 	for i in anim.get_track_count():
-		# (FIND_MODE_NEAREST gives the last key at or before t, so the key
-		# just after t is checked too: the time box rounds to 0.0001 s, which
-		# puts the playhead a hair before a key at a third of a second.)
-		var k := anim.track_find_key(i, t, Animation.FIND_MODE_NEAREST)
-		for j in [k, k + 1]:
-			if j < 0 or j >= anim.track_get_key_count(i):
-				continue
-			var kt := anim.track_get_key_time(i, j)
-			if absf(kt - t) < dist:
-				dist = absf(kt - t)
-				best = kt
+		var k := _near_key(anim, i, t)
+		if k < 0:
+			continue
+		var kt := anim.track_get_key_time(i, k)
+		var off := absf(kt / step - roundf(kt / step)) * step
+		if off < best_off - 1e-7 or (absf(off - best_off) <= 1e-7 and absf(kt - t) < absf(best - t)):
+			best = kt
+			best_off = off
 	return best
 
 
@@ -1286,8 +1309,30 @@ func _commit_key_plan(plan: Dictionary) -> void:
 			ur.add_undo_method(anim, "remove_track", idx)
 			continue
 		var i: int = job.track
-		var k := anim.track_find_key(i, t, Animation.FIND_MODE_APPROX)
+		# This track's own key within half a frame of the playhead (each
+		# track separately: one track's key time must never decide another's).
+		var k := _near_key(anim, i, t)
 		if k >= 0:
+			if type != Animation.TYPE_BEZIER:
+				# Leftover duplicates of it within half a frame go (they made
+				# playback jump between two poses on the same frame).
+				var kt := anim.track_get_key_time(i, k)
+				var dups: Array = []
+				for j in anim.track_get_key_count(i):
+					if j != k and absf(anim.track_get_key_time(i, j) - kt) < _half_frame(anim):
+						dups.append([anim.track_get_key_time(i, j), anim.track_get_key_value(i, j), anim.track_get_key_transition(i, j)])
+				ur.add_do_method(anim, "track_set_key_value", i, k, v)
+				for d in dups:
+					ur.add_do_method(anim, "track_remove_key_at_time", i, d[0])
+					ur.add_undo_method(anim, "track_insert_key", i, d[0], d[1], d[2])
+				# Undo runs backwards: the value is restored first, while the
+				# duplicates are still gone, so use the key's index without them.
+				var k_after := k
+				for d in dups:
+					if d[0] < kt:
+						k_after -= 1
+				ur.add_undo_method(anim, "track_set_key_value", i, k_after, anim.track_get_key_value(i, k))
+				continue
 			if type == Animation.TYPE_BEZIER:
 				ur.add_do_method(anim, "bezier_track_set_key_value", i, k, v)
 				ur.add_undo_method(anim, "bezier_track_set_key_value", i, k, anim.bezier_track_get_key_value(i, k))
