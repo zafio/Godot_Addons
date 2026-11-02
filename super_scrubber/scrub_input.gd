@@ -13,6 +13,9 @@ extends Node
 ##   Space+wheel   change key values: the hovered key, or all selected keys
 ##   or F+wheel    (when hovering a selected key or no key). Shift = fine,
 ##                 hold X/Y/Z to limit to one axis.
+##   Q / E         jump the playhead to the previous / next keyframe of the
+##                 selected track or keys, else of the selected node(s), else
+##                 of the whole animation. Hold to keep stepping.
 
 ## A G press shorter than this (seconds), without moving, counts as a tap.
 const TAP_MAX_TIME := 0.2
@@ -28,6 +31,9 @@ const ROT_STEP_DEG := 5.0
 const FINE_ROT_STEP_DEG := 1.0
 ## Value comparison tolerance when detecting changed properties.
 const EPS := 1e-4
+## A key this close to the playhead counts as being under it (the time SpinBox
+## rounds to 0.0001, so a key's exact time can sit slightly off the playhead).
+const JUMP_EPS := 2e-4
 
 var plugin: EditorPlugin
 
@@ -291,6 +297,9 @@ func _input(event: InputEvent) -> void:
 	if k.keycode == KEY_F:
 		_handle_f(k)
 		return
+	if k.keycode == KEY_Q or k.keycode == KEY_E:
+		_handle_jump(k)
+		return
 	if k.keycode != KEY_G:
 		return
 
@@ -329,6 +338,73 @@ func _handle_f(k: InputEventKey) -> void:
 		_f_down = false
 		if not _f_used_wheel and _nodes_ok():
 			_insert_keys()
+
+
+## Q / E: echo is allowed, so holding the key walks through the keyframes.
+func _handle_jump(k: InputEventKey) -> void:
+	if not k.pressed or _g_down:
+		return
+	if k.ctrl_pressed or k.alt_pressed or k.meta_pressed or k.shift_pressed:
+		return
+	if not _can_handle():
+		return
+	get_viewport().set_input_as_handled()
+	_jump_to_key(-1 if k.keycode == KEY_Q else 1)
+
+
+func _jump_to_key(dir: int) -> void:
+	var player := _find_player()
+	if player == null:
+		return
+	var anim := player.get_animation(player.assigned_animation)
+	if anim == null:
+		return
+	if player.is_playing():
+		_btn_stop.pressed.emit() # pause
+	var now: float = _frame.value
+	var best := 0.0
+	var found := false
+	for track: int in _jump_tracks(anim, player):
+		for k in anim.track_get_key_count(track):
+			var t := anim.track_get_key_time(track, k)
+			var ahead := t > now + JUMP_EPS if dir > 0 else t < now - JUMP_EPS
+			if ahead and (not found or (t < best if dir > 0 else t > best)):
+				best = t
+				found = true
+	if found:
+		_timeline.emit_signal(&"timeline_changed", best, false)
+
+
+## Tracks Q / E look at, most specific selection first:
+##  1. the focused row (the editor's "selected track"), plus the tracks of any
+##     selected keys when that row holds one of them,
+##  2. the tracks of the selected keys,
+##  3. the tracks of the selected node(s),
+##  4. every track.
+func _jump_tracks(anim: Animation, player: AnimationPlayer) -> Array:
+	var key_tracks := {}
+	if anim == _sel_anim and not _clear_mark:
+		for id in _selection:
+			if _selection[id][0] < anim.get_track_count():
+				key_tracks[_selection[id][0]] = true
+	var focus := get_viewport().gui_get_focus_owner()
+	if focus != null and focus.is_class("AnimationTrackEdit"):
+		var rows := _row_track_map(anim)
+		if rows.has(focus):
+			return key_tracks.keys() if key_tracks.has(rows[focus]) else [rows[focus]]
+	if not key_tracks.is_empty():
+		return key_tracks.keys()
+	var all: Array = range(anim.get_track_count())
+	var root := player.get_node_or_null(player.root_node)
+	if root == null:
+		return all
+	var selected := EditorInterface.get_selection().get_selected_nodes()
+	var out: Array = []
+	for i: int in all:
+		var n := _track_node(anim, i, root)
+		if n != null and n != player and n in selected:
+			out.append(i)
+	return out if not out.is_empty() else all
 
 
 func _process(_delta: float) -> void:
