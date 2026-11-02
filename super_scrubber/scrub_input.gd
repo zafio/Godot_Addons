@@ -16,6 +16,15 @@ extends Node
 ##   Q / E         jump the playhead to the previous / next keyframe of the
 ##                 selected track or keys, else of the selected node(s), else
 ##                 of the whole animation. Hold to keep stepping.
+##   Auto Key      (the red-dot button next to "Add Track") while on, every
+##                 change you make in the viewport or Inspector to an animated
+##                 property (moving / rotating / scaling a node, editing a
+##                 value) is keyed at the playhead straight away, like
+##                 Blender's auto keying. Only properties that already have a
+##                 track are keyed. Undo once to remove the key, twice to undo
+##                 the change too.
+## Keys land on an existing key when the playhead is within half a frame of
+## it (so they replace it rather than adding one next to it).
 
 ## A G press shorter than this (seconds), without moving, counts as a tap.
 const TAP_MAX_TIME := 0.2
@@ -90,6 +99,14 @@ var _burst_sig := ""
 var _burst_ms := 0
 var _burst_total := 0.0
 var _rows_check_ms := 0
+
+# Auto Key.
+var _auto_key := false
+var _auto_btn: Button
+var _auto_history: UndoRedo
+var _auto_version := -1
+var _auto_pending := false
+var _committing := false
 var _time_regex := RegEx.create_from_string("(-?[0-9]+(?:[.,][0-9]+)?)\\s*$")
 
 
@@ -114,6 +131,9 @@ func shutdown() -> void:
 		_frame.value_changed.disconnect(_on_frame_changed)
 	if is_instance_valid(_hud):
 		_hud.queue_free()
+	if is_instance_valid(_auto_btn):
+		_auto_btn.queue_free()
+	_watch_history(null)
 
 
 # ---------------------------------------------------------------------------
@@ -419,6 +439,7 @@ func _process(_delta: float) -> void:
 		_hud.hide()
 	if _f_down and not Input.is_key_pressed(KEY_F):
 		_f_down = false
+	_auto_key_tick()
 	# Keep selection-mirror signal connections on (rebuilt) track rows.
 	var now := Time.get_ticks_msec()
 	if now - _rows_check_ms > 250 and not _g_down:
@@ -1141,7 +1162,7 @@ func _on_frame_changed(_v: float) -> void:
 ##       (catches gizmo moves in the viewport),
 ##    3. if nothing changed: every track of the selected node(s).
 ## Returns {anim, t, jobs} or {error}.
-func _build_key_plan(t: float) -> Dictionary:
+func _build_key_plan(t: float, auto: bool = false) -> Dictionary:
 	var player := _find_player()
 	if player == null:
 		return {"error": "SuperScrubber: no AnimationPlayer found."}
@@ -1153,7 +1174,10 @@ func _build_key_plan(t: float) -> Dictionary:
 		return {"error": "SuperScrubber: AnimationPlayer root node not found."}
 
 	var jobs: Array = []
-	var hovered = _hovered_tracks(anim)
+	# What's shown is the animation at the playhead (t); the keys go on an
+	# existing key if one is within half a frame of it.
+	var key_t := _key_time(anim, t)
+	var hovered = null if auto else _hovered_tracks(anim)
 	if hovered != null:
 		for i: int in hovered:
 			if anim.track_is_compressed(i):
@@ -1163,12 +1187,13 @@ func _build_key_plan(t: float) -> Dictionary:
 				jobs.append({"track": i, "type": anim.track_get_type(i), "value": cur})
 		if jobs.is_empty():
 			return {"error": "SuperScrubber: can't read a value for the hovered track."}
-		return {"anim": anim, "t": t, "jobs": jobs}
+		return {"anim": anim, "t": key_t, "jobs": jobs}
 
 	var used := {}
 
-	# 1. Inspector edits.
-	for e in _pending_edits:
+	# 1. Inspector edits (Auto Key: only existing tracks, caught below, so
+	#    editing some unrelated setting never creates a track).
+	for e in ([] if auto else _pending_edits):
 		var node := instance_from_id(e.id) as Node
 		if node == null or not is_instance_valid(node):
 			continue
@@ -1191,7 +1216,7 @@ func _build_key_plan(t: float) -> Dictionary:
 			jobs.append({"track": i, "type": anim.track_get_type(i), "value": cur})
 
 	# 3. Fallback: all tracks of selected nodes.
-	if jobs.is_empty():
+	if jobs.is_empty() and not auto:
 		var selected := EditorInterface.get_selection().get_selected_nodes()
 		for i in anim.get_track_count():
 			if anim.track_is_compressed(i):
@@ -1205,7 +1230,24 @@ func _build_key_plan(t: float) -> Dictionary:
 
 	if jobs.is_empty():
 		return {"error": "SuperScrubber: nothing to key. Hover a track, change a property, or select an animated node."}
-	return {"anim": anim, "t": t, "jobs": jobs}
+	return {"anim": anim, "t": key_t, "jobs": jobs}
+
+
+## The time keys go to: an existing key's time when one is within half a
+## frame of `t` (the animation's step, or 1/60 s), else `t`.
+static func _key_time(anim: Animation, t: float) -> float:
+	var half := (anim.step if anim.step > 0.0 else 1.0 / 30.0) * 0.5
+	var best := t
+	var dist := half
+	for i in anim.get_track_count():
+		var k := anim.track_find_key(i, t, Animation.FIND_MODE_NEAREST)
+		if k < 0:
+			continue
+		var kt := anim.track_get_key_time(i, k)
+		if absf(kt - t) < dist:
+			dist = absf(kt - t)
+			best = kt
+	return best
 
 
 func _insert_keys() -> void:
@@ -1223,7 +1265,8 @@ func _commit_key_plan(plan: Dictionary) -> void:
 	var jobs: Array = plan.jobs
 
 	var ur := plugin.get_undo_redo()
-	ur.create_action("Insert Keyframe(s)", UndoRedo.MERGE_DISABLE, null, true)
+	_committing = true
+	ur.create_action("Auto Key" if plan.get("auto", false) else "Insert Keyframe(s)", UndoRedo.MERGE_DISABLE, null, true)
 	var next_idx := anim.get_track_count()
 	for job in jobs:
 		var type: int = job.type
@@ -1251,6 +1294,8 @@ func _commit_key_plan(plan: Dictionary) -> void:
 			_add_insert_do(ur, anim, i, type, t, v)
 			ur.add_undo_method(anim, "track_remove_key_at_time", i, t)
 	ur.commit_action()
+	_committing = false
+	_auto_version = _auto_history.get_version() if is_instance_valid(_auto_history) else -1
 
 	_pending_edits.clear()
 	_toast("Keyed %d track(s) at %.3f s" % [jobs.size(), t], 0)
@@ -1413,6 +1458,94 @@ static func _values_equal(a, b) -> bool:
 		TYPE_TRANSFORM2D, TYPE_TRANSFORM3D, TYPE_BASIS, TYPE_RECT2, TYPE_AABB, TYPE_PLANE:
 			return a.is_equal_approx(b)
 	return a == b
+
+
+# ---------------------------------------------------------------------------
+# Auto Key
+# ---------------------------------------------------------------------------
+
+## Every frame: keep the button in the Animation panel, follow the edited
+## scene's undo history, and key after a new change.
+func _auto_key_tick() -> void:
+	if not _nodes_ok():
+		return
+	if not is_instance_valid(_auto_btn) or not _auto_btn.is_inside_tree():
+		_add_auto_button()
+	if not _auto_key:
+		return
+	var root := EditorInterface.get_edited_scene_root()
+	var ur := plugin.get_undo_redo()
+	var history: UndoRedo = ur.get_history_undo_redo(ur.get_object_history_id(root)) if root else null
+	if history != _auto_history:
+		_watch_history(history)
+	if _auto_pending:
+		_auto_pending = false
+		_auto_key_now()
+
+
+func _watch_history(history: UndoRedo) -> void:
+	if is_instance_valid(_auto_history) and _auto_history.version_changed.is_connected(_on_history_version):
+		_auto_history.version_changed.disconnect(_on_history_version)
+	_auto_history = history
+	_auto_version = history.get_version() if history else -1
+	if history:
+		history.version_changed.connect(_on_history_version)
+
+
+## A change was committed, undone or redone. Only a new change (the version
+## went up and nothing is left to redo) is keyed, on the next frame, once the
+## gizmo or Inspector has finished applying it.
+func _on_history_version() -> void:
+	if not is_instance_valid(_auto_history):
+		return
+	var v := _auto_history.get_version()
+	var fresh := v > _auto_version and not _auto_history.has_redo()
+	_auto_version = v
+	if fresh and _auto_key and not _committing:
+		_auto_pending = true
+
+
+func _auto_key_now() -> void:
+	if not _track_editor.is_visible_in_tree():
+		return
+	var player := _find_player()
+	if player == null or player.is_playing() or not player.has_animation(player.assigned_animation):
+		return
+	var plan := _build_key_plan(_frame.value, true)
+	if plan.has("error"):
+		return # nothing animated changed
+	plan["auto"] = true
+	_commit_key_plan(plan)
+
+
+func _add_auto_button() -> void:
+	if not is_instance_valid(_add_track_hb):
+		return
+	if is_instance_valid(_auto_btn):
+		_auto_btn.queue_free()
+	_auto_btn = Button.new()
+	_auto_btn.name = "SuperScrubberAutoKey"
+	_auto_btn.toggle_mode = true
+	_auto_btn.flat = true
+	_auto_btn.text = "●"
+	_auto_btn.tooltip_text = "Auto Key (SuperScrubber): key every change to an animated property at the playhead, as you make it."
+	_auto_btn.add_theme_color_override(&"font_pressed_color", Color(1.0, 0.25, 0.25))
+	_auto_btn.add_theme_color_override(&"font_hover_pressed_color", Color(1.0, 0.4, 0.4))
+	_auto_key = bool(EditorInterface.get_editor_settings().get_project_metadata("super_scrubber", "auto_key", false))
+	_auto_btn.button_pressed = _auto_key
+	_auto_btn.toggled.connect(_set_auto_key)
+	_add_track_hb.add_child(_auto_btn)
+	_add_track_hb.move_child(_auto_btn, 0)
+
+
+func _set_auto_key(on: bool) -> void:
+	_auto_key = on
+	_auto_pending = false
+	EditorInterface.get_editor_settings().set_project_metadata("super_scrubber", "auto_key", on)
+	if is_instance_valid(_auto_btn) and _auto_btn.button_pressed != on:
+		_auto_btn.set_pressed_no_signal(on)
+	if is_instance_valid(_auto_history):
+		_auto_version = _auto_history.get_version()
 
 
 func _toast(msg: String, severity: int) -> void:
