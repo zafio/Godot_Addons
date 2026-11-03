@@ -1855,8 +1855,8 @@ func _add_speed_controls() -> void:
 
 	var speed := EditorSpinSlider.new()
 	speed.name = "SuperScrubberSpeed"
-	speed.min_value = -64.0
-	speed.max_value = 64.0
+	speed.min_value = 0.0
+	speed.max_value = 2.0 # 1x in the middle; typing goes past either end
 	speed.step = 0.01
 	speed.allow_lesser = true
 	speed.allow_greater = true
