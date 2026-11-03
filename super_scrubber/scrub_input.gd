@@ -59,6 +59,8 @@ const EPS := 1e-4
 const JUMP_EPS := 2e-4
 ## FPS mode: the rate until the user picks another one.
 const DEFAULT_FPS := 15.0
+## Auto Key button's dot.
+const AUTO_DOT_SVG := "<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16'><circle cx='8' cy='8' r='6.5' fill='#fff'/></svg>"
 
 var plugin: EditorPlugin
 
@@ -1776,10 +1778,10 @@ func _add_auto_button() -> void:
 	_auto_btn.name = "SuperScrubberAutoKey"
 	_auto_btn.toggle_mode = true
 	_auto_btn.flat = true
-	_auto_btn.text = "●"
+	_auto_btn.icon = _dot_icon()
 	_auto_btn.tooltip_text = "Auto Key (SuperScrubber): key every change to an animated property at the playhead, as you make it."
-	_auto_btn.add_theme_color_override(&"font_pressed_color", Color(1.0, 0.25, 0.25))
-	_auto_btn.add_theme_color_override(&"font_hover_pressed_color", Color(1.0, 0.4, 0.4))
+	_auto_btn.add_theme_color_override(&"icon_pressed_color", Color(1.0, 0.25, 0.25))
+	_auto_btn.add_theme_color_override(&"icon_hover_pressed_color", Color(1.0, 0.4, 0.4))
 	_auto_key = bool(EditorInterface.get_editor_settings().get_project_metadata("super_scrubber", "auto_key", false))
 	_auto_btn.button_pressed = _auto_key
 	_auto_btn.toggled.connect(_set_auto_key)
@@ -1797,6 +1799,14 @@ func _add_auto_button() -> void:
 	_filter_btn.toggled.connect(_set_sel_filter)
 	_add_track_hb.add_child(_filter_btn)
 	_add_track_hb.move_child(_filter_btn, 1)
+
+
+## The record dot, white so the button's icon colours tint it. An icon rather than
+## a "●" as text: a bigger font would make the button taller than the row it's in.
+func _dot_icon() -> Texture2D:
+	var img := Image.new()
+	img.load_svg_from_string(AUTO_DOT_SVG, EditorInterface.get_editor_scale())
+	return ImageTexture.create_from_image(img)
 
 
 func _set_auto_key(on: bool) -> void:
