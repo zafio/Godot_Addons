@@ -7,6 +7,9 @@ var _input_node: Node
 
 
 func _enter_tree() -> void:
+	if not EditorInterface.get_editor_settings().has_method("add_shortcut"):
+		push_error("SuperScrubber needs Godot 4.6 or newer.")
+		return
 	_input_node = ScrubInput.new()
 	_input_node.name = "SuperScrubberInput"
 	_input_node.plugin = self

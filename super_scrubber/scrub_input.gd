@@ -37,6 +37,7 @@ extends Node
 ##                 holding each pose with no interpolation in between, on
 ##                 frames of the animation (at speed 0.5 each one holds twice
 ##                 as long).
+## All the keys above can be changed in Editor Settings > Shortcuts > Super Scrubber.
 ## Keys land on an existing key when the playhead is within half a frame of
 ## it (so they replace it rather than adding one next to it).
 
@@ -57,6 +58,27 @@ const EPS := 1e-4
 ## A key this close to the playhead counts as being under it (the time SpinBox
 ## rounds to 0.0001, so a key's exact time can sit slightly off the playhead).
 const JUMP_EPS := 2e-4
+## Editor Settings > Shortcuts > Super Scrubber: path -> [title, default key, ctrl].
+const SC_SCRUB := "super_scrubber/scrub_or_key"
+const SC_KEY := "super_scrubber/key"
+const SC_PREV_KEY := "super_scrubber/previous_key"
+const SC_NEXT_KEY := "super_scrubber/next_key"
+const SC_FILTER := "super_scrubber/selected_tracks_filter"
+const SC_WHEEL := "super_scrubber/change_values_with_wheel"
+const SC_AXIS_X := "super_scrubber/wheel_axis_x"
+const SC_AXIS_Y := "super_scrubber/wheel_axis_y"
+const SC_AXIS_Z := "super_scrubber/wheel_axis_z"
+const SHORTCUTS := {
+	SC_SCRUB: ["Scrub (Hold) / Insert Key (Tap)", KEY_G, false],
+	SC_KEY: ["Insert Key (Tap) / Wheel Changes Values (Hold)", KEY_F, false],
+	SC_PREV_KEY: ["Jump to Previous Key", KEY_Q, false],
+	SC_NEXT_KEY: ["Jump to Next Key", KEY_E, false],
+	SC_FILTER: ["Show Only Selected Nodes' Tracks", KEY_F, true],
+	SC_WHEEL: ["Wheel Changes Values (Hold)", KEY_SPACE, false],
+	SC_AXIS_X: ["Wheel: X / Red Only (Hold)", KEY_X, false],
+	SC_AXIS_Y: ["Wheel: Y / Green Only (Hold)", KEY_Y, false],
+	SC_AXIS_Z: ["Wheel: Z / Blue Only (Hold)", KEY_Z, false],
+}
 ## FPS mode: the rate until the user picks another one.
 const DEFAULT_FPS := 15.0
 ## Auto Key button's dot.
@@ -91,6 +113,7 @@ var _attached := false
 
 # State.
 var _g_down := false
+var _g_key := KEY_NONE # the key that started it, for its release
 var _g_press_time := 0.0
 var _g_key_plan: Dictionary = {}
 var _g_press_ms := 0
@@ -116,6 +139,7 @@ var _clear_mark := false
 
 # F key state.
 var _f_down := false
+var _f_key := KEY_NONE
 var _f_used_wheel := false
 
 # Value feedback.
@@ -158,6 +182,7 @@ var _time_regex := RegEx.create_from_string("(-?[0-9]+(?:[.,][0-9]+)?)\\s*$")
 
 
 func _ready() -> void:
+	_register_shortcuts()
 	set_process(true)
 	set_process_input(true)
 	var inspector := EditorInterface.get_inspector()
@@ -344,6 +369,36 @@ func _time_to_x(t: float) -> float:
 # Input
 # ---------------------------------------------------------------------------
 
+func _register_shortcuts() -> void:
+	var es := EditorInterface.get_editor_settings()
+	for path: String in SHORTCUTS:
+		var entry: Array = SHORTCUTS[path]
+		var ev := InputEventKey.new()
+		ev.keycode = entry[1]
+		ev.ctrl_pressed = entry[2]
+		var sc := Shortcut.new()
+		sc.resource_name = entry[0]
+		sc.events = [ev]
+		es.add_shortcut(path, sc) # only sets the default: a changed key stays
+
+
+func _is_shortcut(path: String, k: InputEventKey) -> bool:
+	var sc: Shortcut = EditorInterface.get_editor_settings().get_shortcut(path)
+	return sc != null and sc.matches_event(k)
+
+
+## Whether the key of a shortcut used as a modifier is down right now.
+func _is_held(path: String) -> bool:
+	var sc: Shortcut = EditorInterface.get_editor_settings().get_shortcut(path)
+	if sc == null:
+		return false
+	for e in sc.events:
+		var k := e as InputEventKey
+		if k and (Input.is_key_pressed(k.keycode) or Input.is_physical_key_pressed(k.physical_keycode)):
+			return true
+	return false
+
+
 func _local_mouse(c: CanvasItem) -> Vector2:
 	if debug_mouse != null:
 		return c.get_global_transform_with_canvas().affine_inverse() * debug_mouse
@@ -379,28 +434,37 @@ func _input(event: InputEvent) -> void:
 	var k := event as InputEventKey
 	if k == null:
 		return
-	if k.keycode == KEY_F and k.ctrl_pressed:
-		_handle_selected_filter(k)
-		return
-	if k.keycode == KEY_F:
+	# A held key first: its release may not match the shortcut any more (a
+	# modifier went down meanwhile).
+	if _f_down and k.keycode == _f_key:
 		_handle_f(k)
 		return
-	if k.keycode == KEY_Q or k.keycode == KEY_E:
-		_handle_jump(k)
-		return
-	if k.keycode != KEY_G:
-		return
+	var scrub_key := _g_down and k.keycode == _g_key
+	if not scrub_key:
+		if _is_shortcut(SC_FILTER, k):
+			_handle_selected_filter(k)
+			return
+		if _is_shortcut(SC_KEY, k):
+			_handle_f(k)
+			return
+		if _is_shortcut(SC_PREV_KEY, k):
+			_handle_jump(k, -1)
+			return
+		if _is_shortcut(SC_NEXT_KEY, k):
+			_handle_jump(k, 1)
+			return
+		if not _is_shortcut(SC_SCRUB, k):
+			return
 
 	if k.pressed:
 		if k.echo or _g_down:
 			if _g_down:
 				get_viewport().set_input_as_handled()
 			return
-		if k.ctrl_pressed or k.alt_pressed or k.meta_pressed or k.shift_pressed:
-			return
 		if not _can_handle():
 			return
 		get_viewport().set_input_as_handled()
+		_g_key = k.keycode
 		_g_press()
 	elif _g_down:
 		get_viewport().set_input_as_handled()
@@ -414,12 +478,11 @@ func _handle_f(k: InputEventKey) -> void:
 			if _f_down:
 				get_viewport().set_input_as_handled()
 			return
-		if k.ctrl_pressed or k.alt_pressed or k.meta_pressed or k.shift_pressed:
-			return
 		if not _can_handle():
 			return
 		get_viewport().set_input_as_handled()
 		_f_down = true
+		_f_key = k.keycode
 		_f_used_wheel = false
 	elif _f_down:
 		get_viewport().set_input_as_handled()
@@ -435,8 +498,6 @@ func _handle_f(k: InputEventKey) -> void:
 ## keeps the last non-empty selection.
 func _handle_selected_filter(k: InputEventKey) -> void:
 	if not k.pressed or k.echo or _g_down or _f_down:
-		return
-	if k.alt_pressed or k.meta_pressed or k.shift_pressed:
 		return
 	if not _can_handle():
 		return
@@ -550,15 +611,13 @@ func _selected_filter_button() -> Button:
 
 
 ## Q / E: echo is allowed, so holding the key walks through the keyframes.
-func _handle_jump(k: InputEventKey) -> void:
+func _handle_jump(k: InputEventKey, dir: int) -> void:
 	if not k.pressed or _g_down:
-		return
-	if k.ctrl_pressed or k.alt_pressed or k.meta_pressed or k.shift_pressed:
 		return
 	if not _can_handle():
 		return
 	get_viewport().set_input_as_handled()
-	_jump_to_key(-1 if k.keycode == KEY_Q else 1)
+	_jump_to_key(dir)
 
 
 func _jump_to_key(dir: int) -> void:
@@ -620,7 +679,7 @@ func _process(delta: float) -> void:
 	_fps_tick(delta)
 	if is_instance_valid(_hud) and _hud.visible and Time.get_ticks_msec() > _hud_hide_ms:
 		_hud.hide()
-	if _f_down and not Input.is_key_pressed(KEY_F):
+	if _f_down and not Input.is_key_pressed(_f_key):
 		_f_down = false
 	# Find the Animation panel's controls on our own (the Auto Key and filter
 	# buttons used to appear only after the first G / F / Q / E over it).
@@ -638,7 +697,7 @@ func _process(delta: float) -> void:
 		_watch_rows()
 
 	# Safety net if the key-up event went elsewhere (focus change, window switch).
-	if _g_down and not Input.is_key_pressed(KEY_G):
+	if _g_down and not Input.is_key_pressed(_g_key):
 		_g_release(false)
 
 	if _g_down and _nodes_ok():
@@ -863,7 +922,7 @@ func _handle_wheel(mb: InputEventMouseButton) -> bool:
 	if not mb.pressed or mb.ctrl_pressed or mb.alt_pressed or mb.meta_pressed:
 		return false
 	var via_f := _f_down
-	if not via_f and not Input.is_key_pressed(KEY_SPACE):
+	if not via_f and not _is_held(SC_WHEEL):
 		return false
 	var dir := 0
 	match mb.button_index:
@@ -958,11 +1017,11 @@ func _key_under_mouse() -> Dictionary:
 
 func _nudge_targets(anim: Animation, targets: Array, amount: float, fine: bool, hit: Dictionary) -> void:
 	var axis := -1
-	if Input.is_key_pressed(KEY_X):
+	if _is_held(SC_AXIS_X):
 		axis = 0
-	elif Input.is_key_pressed(KEY_Y):
+	elif _is_held(SC_AXIS_Y):
 		axis = 1
-	elif Input.is_key_pressed(KEY_Z):
+	elif _is_held(SC_AXIS_Z):
 		axis = 2
 
 	var ur := plugin.get_undo_redo()
@@ -1794,7 +1853,7 @@ func _add_auto_button() -> void:
 	_filter_btn.toggle_mode = true
 	_filter_btn.flat = true
 	_filter_btn.icon = EditorInterface.get_editor_theme().get_icon(&"AnimationFilter", &"EditorIcons")
-	_filter_btn.tooltip_text = "Show only the tracks of the selected nodes (SuperScrubber, Ctrl+F over the panel). Clicking a key keeps the list; select other nodes to change it."
+	_filter_btn.tooltip_text = "Show only the tracks of the selected nodes (SuperScrubber, Ctrl+F over the panel by default). Clicking a key keeps the list; select other nodes to change it."
 	_filter_btn.button_pressed = _sel_filter
 	_filter_btn.toggled.connect(_set_sel_filter)
 	_add_track_hb.add_child(_filter_btn)
