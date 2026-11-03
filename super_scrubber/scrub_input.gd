@@ -32,7 +32,7 @@ extends Node
 ##                 properties and unanimated nodes never create tracks). Undo once to remove the key, twice to undo
 ##                 the change too.
 ##   Speed box     (next to the time box) the AnimationPlayer's Speed Scale, the
-##                 same value as in the Inspector.
+##                 same value as in the Inspector. Double click sets it to 1.
 ##   FPS button    while on, playback steps at the rate in the box beside it,
 ##                 holding each pose with no interpolation in between, on
 ##                 frames of the animation (at speed 0.5 each one holds twice
@@ -140,6 +140,7 @@ var _committing := false
 
 # Speed box and FPS mode.
 var _speed_box: EditorSpinSlider
+var _speed_knob_double := false
 var _fps_btn: Button
 var _fps_accent := Color.TRANSPARENT
 var _fps_box: EditorSpinSlider
@@ -1869,8 +1870,10 @@ func _add_speed_controls() -> void:
 	speed.allow_greater = true
 	speed.suffix = "x"
 	speed.custom_minimum_size.x = 70.0 * s
-	speed.tooltip_text = "Speed Scale of the AnimationPlayer (SuperScrubber), the same value as in the Inspector."
+	speed.tooltip_text = "Speed Scale of the AnimationPlayer (SuperScrubber), the same value as in the Inspector. Double click to set it to 1."
 	speed.value_changed.connect(_on_speed_changed)
+	speed.value_focus_entered.connect(_watch_speed_text)
+	_find_class_typed(speed, TextureRect).gui_input.connect(_on_speed_knob_input)
 	_speed_box = speed
 
 	_fps_btn = Button.new()
@@ -1916,6 +1919,35 @@ func _on_speed_changed(v: float) -> void:
 	ur.add_undo_property(player, &"speed_scale", player.speed_scale)
 	ur.commit_action()
 	_committing = false
+
+
+## Double click: Speed Scale back to 1. The first click of a double click on the
+## box opens its text field (a child made on first use), so the second lands there.
+func _watch_speed_text() -> void:
+	var text: LineEdit = _find_class_typed(_speed_box, LineEdit)
+	if text and not text.gui_input.is_connected(_on_speed_text_input):
+		text.gui_input.connect(_on_speed_text_input.bind(text))
+
+
+func _on_speed_text_input(event: InputEvent, text: LineEdit) -> void:
+	var mb := event as InputEventMouseButton
+	if mb and mb.button_index == MOUSE_BUTTON_LEFT and mb.pressed and mb.double_click:
+		text.accept_event()
+		text.text = "1"
+		text.text_submitted.emit(text.text) # the box's own handler closes the field
+
+
+## On the slider's knob the second click starts a drag, which would put the value
+## back with the slightest movement, so the reset waits for the button to go up.
+func _on_speed_knob_input(event: InputEvent) -> void:
+	var mb := event as InputEventMouseButton
+	if mb == null or mb.button_index != MOUSE_BUTTON_LEFT:
+		return
+	if mb.pressed:
+		_speed_knob_double = mb.double_click
+	elif _speed_knob_double:
+		_speed_knob_double = false
+		_speed_box.value = 1.0
 
 
 func _set_fps_mode(on: bool) -> void:
