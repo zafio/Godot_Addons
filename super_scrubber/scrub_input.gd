@@ -31,6 +31,12 @@ extends Node
 ##                 or scale track when that part has none yet (other
 ##                 properties and unanimated nodes never create tracks). Undo once to remove the key, twice to undo
 ##                 the change too.
+##   Speed box     (next to the time box) the AnimationPlayer's Speed Scale, the
+##                 same value as in the Inspector.
+##   FPS button    while on, playback steps at the rate in the box beside it,
+##                 holding each pose with no interpolation in between, on
+##                 frames of the animation (at speed 0.5 each one holds twice
+##                 as long).
 ## Keys land on an existing key when the playhead is within half a frame of
 ## it (so they replace it rather than adding one next to it).
 
@@ -51,6 +57,8 @@ const EPS := 1e-4
 ## A key this close to the playhead counts as being under it (the time SpinBox
 ## rounds to 0.0001, so a key's exact time can sit slightly off the playhead).
 const JUMP_EPS := 2e-4
+## FPS mode: the rate until the user picks another one.
+const DEFAULT_FPS := 15.0
 
 var plugin: EditorPlugin
 
@@ -129,6 +137,19 @@ var _auto_pending := false
 var _auto_snap := {}
 var _auto_snap_refresh := false
 var _committing := false
+
+# Speed box and FPS mode.
+var _speed_box: EditorSpinSlider
+var _fps_btn: Button
+var _fps_box: EditorSpinSlider
+var _fps_mode := false
+var _fps := DEFAULT_FPS
+## The player being stepped, its own process mode to give back, and the time
+## built up since its last step.
+var _fps_player: AnimationPlayer
+var _fps_saved_mode := AnimationMixer.ANIMATION_CALLBACK_MODE_PROCESS_IDLE
+var _fps_time := 0.0
+
 var _time_regex := RegEx.create_from_string("(-?[0-9]+(?:[.,][0-9]+)?)\\s*$")
 
 
@@ -144,6 +165,7 @@ func _ready() -> void:
 
 
 func shutdown() -> void:
+	set_process(false) # queue_free() runs at the end of the frame: no ticks until then
 	if _inspector_connected:
 		var inspector := EditorInterface.get_inspector()
 		if inspector and inspector.property_edited.is_connected(_on_property_edited):
@@ -158,6 +180,10 @@ func shutdown() -> void:
 		_auto_btn.queue_free()
 	if is_instance_valid(_filter_btn):
 		_filter_btn.queue_free()
+	for c: Control in [_speed_box, _fps_btn, _fps_box]:
+		if is_instance_valid(c):
+			c.queue_free()
+	release_fps_player()
 	_clear_sel_filter()
 	_watch_history(null)
 	if EditorInterface.get_selection().selection_changed.is_connected(_on_selection_changed):
@@ -586,7 +612,8 @@ func _jump_tracks(anim: Animation, player: AnimationPlayer) -> Array:
 	return out if not out.is_empty() else all
 
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
+	_fps_tick(delta)
 	if is_instance_valid(_hud) and _hud.visible and Time.get_ticks_msec() > _hud_hide_ms:
 		_hud.hide()
 	if _f_down and not Input.is_key_pressed(KEY_F):
@@ -597,6 +624,7 @@ func _process(_delta: float) -> void:
 		_find_ms = Time.get_ticks_msec()
 		_ensure_nodes()
 	_auto_key_tick()
+	_speed_ui_tick()
 	if _sel_filter:
 		_apply_sel_filter()
 	# Keep selection-mirror signal connections on (rebuilt) track rows.
@@ -1797,6 +1825,153 @@ func _take_auto_snap(all: bool) -> void:
 func _on_selection_changed() -> void:
 	if _auto_key:
 		_take_auto_snap(false)
+
+
+# ---------------------------------------------------------------------------
+# Speed box and FPS mode
+# ---------------------------------------------------------------------------
+
+## Every frame: keep the controls in the Animation panel and showing the
+## current player's speed (it can also change in the Inspector or by undo).
+func _speed_ui_tick() -> void:
+	if not _nodes_ok():
+		return
+	if not is_instance_valid(_speed_box) or not _speed_box.is_inside_tree():
+		_add_speed_controls()
+	var player := _find_player()
+	_speed_box.read_only = player == null
+	if player and _speed_box.value != player.speed_scale:
+		_speed_box.set_value_no_signal(player.speed_scale)
+
+
+func _add_speed_controls() -> void:
+	for c: Control in [_speed_box, _fps_btn, _fps_box]:
+		if is_instance_valid(c):
+			c.queue_free()
+	var s := EditorInterface.get_editor_scale()
+	var settings := EditorInterface.get_editor_settings()
+	_fps_mode = bool(settings.get_project_metadata("super_scrubber", "fps_mode", false))
+	_fps = float(settings.get_project_metadata("super_scrubber", "fps", DEFAULT_FPS))
+
+	var speed := EditorSpinSlider.new()
+	speed.name = "SuperScrubberSpeed"
+	speed.min_value = -64.0
+	speed.max_value = 64.0
+	speed.step = 0.01
+	speed.allow_lesser = true
+	speed.allow_greater = true
+	speed.suffix = "x"
+	speed.custom_minimum_size.x = 70.0 * s
+	speed.tooltip_text = "Speed Scale of the AnimationPlayer (SuperScrubber), the same value as in the Inspector."
+	speed.value_changed.connect(_on_speed_changed)
+	_speed_box = speed
+
+	_fps_btn = Button.new()
+	_fps_btn.name = "SuperScrubberFpsMode"
+	_fps_btn.toggle_mode = true
+	_fps_btn.flat = true
+	_fps_btn.text = "FPS"
+	_fps_btn.tooltip_text = "FPS mode (SuperScrubber): play stepped at the rate on the right, with no interpolation between frames."
+	_fps_btn.button_pressed = _fps_mode
+	_fps_btn.toggled.connect(_set_fps_mode)
+
+	var fps := EditorSpinSlider.new()
+	fps.name = "SuperScrubberFps"
+	fps.min_value = 1.0
+	fps.max_value = 120.0
+	fps.step = 1.0
+	fps.allow_greater = true
+	fps.value = _fps
+	fps.custom_minimum_size.x = 56.0 * s
+	fps.tooltip_text = "Frames per second of FPS mode (SuperScrubber)."
+	fps.value_changed.connect(_set_fps)
+	_fps_box = fps
+
+	var at := _frame.get_index(true)
+	for c: Control in [_speed_box, _fps_btn, _fps_box]:
+		_frame.get_parent().add_child(c)
+		at += 1
+		_frame.get_parent().move_child(c, at)
+
+
+## The same as editing Speed Scale in the Inspector: undoable, and dragging the
+## box makes a single undo step.
+func _on_speed_changed(v: float) -> void:
+	var player := _find_player()
+	if player == null or player.speed_scale == v:
+		return
+	var ur := plugin.get_undo_redo()
+	_committing = true
+	ur.create_action("Set Speed Scale", UndoRedo.MERGE_ENDS, player)
+	ur.add_do_property(player, &"speed_scale", v)
+	ur.add_undo_property(player, &"speed_scale", player.speed_scale)
+	ur.commit_action()
+	_committing = false
+
+
+func _set_fps_mode(on: bool) -> void:
+	_fps_mode = on
+	EditorInterface.get_editor_settings().set_project_metadata("super_scrubber", "fps_mode", on)
+
+
+func _set_fps(v: float) -> void:
+	_fps = v
+	EditorInterface.get_editor_settings().set_project_metadata("super_scrubber", "fps", v)
+
+
+## FPS mode leaves the playing to the AnimationPlayer (so Stop, looping, playing
+## backwards and the Speed Scale all keep working) but switches it to manual
+## processing while it plays, and advances it here one frame at a time.
+func _fps_tick(delta: float) -> void:
+	var player: AnimationPlayer = _fps_player if is_instance_valid(_fps_player) else null
+	if player and (not _fps_mode or not player.is_playing() or not player.is_inside_tree()):
+		release_fps_player()
+		player = null
+	if not _fps_mode:
+		return
+	if player == null:
+		player = _playing_player()
+		if player == null or player.callback_mode_process == AnimationMixer.ANIMATION_CALLBACK_MODE_PROCESS_MANUAL:
+			return
+		_fps_player = player
+		_fps_saved_mode = player.callback_mode_process
+		_fps_time = 0.0
+		player.callback_mode_process = AnimationMixer.ANIMATION_CALLBACK_MODE_PROCESS_MANUAL
+
+	var speed := player.get_playing_speed()
+	var rate := _fps * absf(speed)
+	if rate <= 0.0:
+		return
+	_fps_time += delta
+	var steps := floori(_fps_time * rate)
+	if steps < 1:
+		return
+	_fps_time -= steps / rate
+	# Step along the frames of the animation, wherever playback started from.
+	var frame := player.current_animation_position * _fps
+	var target: float = floorf(frame + 1e-3) + steps if speed > 0.0 else ceilf(frame - 1e-3) - steps
+	player.advance((target / _fps - player.current_animation_position) / speed)
+
+
+## Gives the stepped player its own process mode back. Also called before the
+## editor saves, so the manual mode never ends up in a scene file (the next
+## frame takes the player over again if it's still playing).
+func release_fps_player() -> void:
+	if is_instance_valid(_fps_player):
+		_fps_player.callback_mode_process = _fps_saved_mode
+	_fps_player = null
+
+
+func _playing_player() -> AnimationPlayer:
+	var root := EditorInterface.get_edited_scene_root()
+	if root == null:
+		return null
+	var players: Array = []
+	_collect_players(root, players)
+	for p: AnimationPlayer in players:
+		if p.is_playing():
+			return p
+	return null
 	# An empty selection (a key clicked into the Inspector, or a click on
 	# nothing) keeps the filter as it was.
 	if _sel_filter:

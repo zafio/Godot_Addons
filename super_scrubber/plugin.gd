@@ -13,6 +13,11 @@ func _enter_tree() -> void:
 	add_child(_input_node)
 
 
+func _apply_changes() -> void:
+	if is_instance_valid(_input_node):
+		_input_node.release_fps_player()
+
+
 func _exit_tree() -> void:
 	if is_instance_valid(_input_node):
 		_input_node.shutdown()
