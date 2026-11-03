@@ -1837,6 +1837,12 @@ func _take_auto_snap(all: bool) -> void:
 func _on_selection_changed() -> void:
 	if _auto_key:
 		_take_auto_snap(false)
+	# An empty selection (a key clicked into the Inspector, or a click on
+	# nothing) keeps the filter as it was.
+	if _sel_filter:
+		var ids := _selected_ids()
+		if not ids.is_empty():
+			_sel_filter_ids = ids
 
 
 # ---------------------------------------------------------------------------
@@ -2023,12 +2029,6 @@ func _playing_player() -> AnimationPlayer:
 		if p.is_playing():
 			return p
 	return null
-	# An empty selection (a key clicked into the Inspector, or a click on
-	# nothing) keeps the filter as it was.
-	if _sel_filter:
-		var ids := _selected_ids()
-		if not ids.is_empty():
-			_sel_filter_ids = ids
 
 
 ## Auto Key on a selected 3D node whose position / rotation / scale changed
