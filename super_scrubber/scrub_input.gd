@@ -141,6 +141,7 @@ var _committing := false
 # Speed box and FPS mode.
 var _speed_box: EditorSpinSlider
 var _fps_btn: Button
+var _fps_accent := Color.TRANSPARENT
 var _fps_box: EditorSpinSlider
 var _fps_mode := false
 var _fps := DEFAULT_FPS
@@ -1839,6 +1840,12 @@ func _speed_ui_tick() -> void:
 	if not is_instance_valid(_speed_box) or not _speed_box.is_inside_tree():
 		_add_speed_controls()
 	var player := _find_player()
+	# Followed every frame so a theme change in the Editor Settings carries over.
+	var accent := _fps_btn.get_theme_color(&"accent_color", &"Editor")
+	if accent != _fps_accent:
+		_fps_accent = accent
+		_fps_btn.add_theme_color_override(&"font_pressed_color", accent)
+		_fps_btn.add_theme_color_override(&"font_hover_pressed_color", accent)
 	_speed_box.read_only = player == null
 	if player and _speed_box.value != player.speed_scale:
 		_speed_box.set_value_no_signal(player.speed_scale)
@@ -1870,6 +1877,8 @@ func _add_speed_controls() -> void:
 	_fps_btn.name = "SuperScrubberFpsMode"
 	_fps_btn.toggle_mode = true
 	_fps_btn.flat = true
+	_fps_btn.focus_mode = Control.FOCUS_NONE # a focused button would draw in the focus colour
+	_fps_accent = Color.TRANSPARENT
 	_fps_btn.text = "FPS"
 	_fps_btn.tooltip_text = "FPS mode (SuperScrubber): play stepped at the rate on the right, with no interpolation between frames."
 	_fps_btn.button_pressed = _fps_mode
