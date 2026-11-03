@@ -60,7 +60,7 @@ const JUMP_EPS := 2e-4
 ## FPS mode: the rate until the user picks another one.
 const DEFAULT_FPS := 15.0
 ## Auto Key button's dot.
-const AUTO_DOT_SVG := "<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16'><circle cx='8' cy='8' r='6.5' fill='#fff'/></svg>"
+const AUTO_DOT_SVG := "<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16'><circle cx='8' cy='8' r='6' fill='#fff'/></svg>"
 
 var plugin: EditorPlugin
 
