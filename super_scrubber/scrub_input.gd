@@ -36,7 +36,7 @@ extends Node
 ##   FPS button    while on, playback steps at the rate in the box beside it,
 ##                 holding each pose with no interpolation in between, on
 ##                 frames of the animation (at speed 0.5 each one holds twice
-##                 as long).
+##                 as long). Double click the rate to set it to 30.
 ## All the keys above can be changed in Editor Settings > Shortcuts > Super Scrubber.
 ## Keys land on an existing key when the playhead is within half a frame of
 ## it (so they replace it rather than adding one next to it).
@@ -81,6 +81,8 @@ const SHORTCUTS := {
 }
 ## FPS mode: the rate until the user picks another one.
 const DEFAULT_FPS := 15.0
+## The rate a double click on its box goes to.
+const FPS_DOUBLE_CLICK := 30.0
 ## Auto Key button's dot.
 const AUTO_DOT_SVG := "<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16'><circle cx='8' cy='8' r='6' fill='#fff'/></svg>"
 
@@ -166,7 +168,7 @@ var _committing := false
 
 # Speed box and FPS mode.
 var _speed_box: EditorSpinSlider
-var _speed_knob_double := false
+var _knob_double := false
 var _fps_btn: Button
 var _fps_accent := Color.TRANSPARENT
 var _fps_box: EditorSpinSlider
@@ -1947,8 +1949,7 @@ func _add_speed_controls() -> void:
 	speed.custom_minimum_size.x = 70.0 * s
 	speed.tooltip_text = "Speed Scale of the AnimationPlayer (SuperScrubber), the same value as in the Inspector. Double click to set it to 1."
 	speed.value_changed.connect(_on_speed_changed)
-	speed.value_focus_entered.connect(_watch_speed_text)
-	_find_class_typed(speed, TextureRect).gui_input.connect(_on_speed_knob_input)
+	_reset_on_double_click(speed, 1.0)
 	_speed_box = speed
 
 	_fps_btn = Button.new()
@@ -1970,8 +1971,9 @@ func _add_speed_controls() -> void:
 	fps.allow_greater = true
 	fps.value = _fps
 	fps.custom_minimum_size.x = 56.0 * s
-	fps.tooltip_text = "Frames per second of FPS mode (SuperScrubber)."
+	fps.tooltip_text = "Frames per second of FPS mode (SuperScrubber). Double click to set it to 30."
 	fps.value_changed.connect(_set_fps)
+	_reset_on_double_click(fps, FPS_DOUBLE_CLICK)
 	_fps_box = fps
 
 	var at := _frame.get_index(true)
@@ -1996,33 +1998,39 @@ func _on_speed_changed(v: float) -> void:
 	_committing = false
 
 
-## Double click: Speed Scale back to 1. The first click of a double click on the
-## box opens its text field (a child made on first use), so the second lands there.
-func _watch_speed_text() -> void:
-	var text: LineEdit = _find_class_typed(_speed_box, LineEdit)
-	if text and not text.gui_input.is_connected(_on_speed_text_input):
-		text.gui_input.connect(_on_speed_text_input.bind(text))
+## Double click puts a box back to `value`. The first click of a double click on
+## the box opens its text field (a child made on first use), so the second lands
+## there; `_watch_box_text` hooks that field once the box has made it.
+func _reset_on_double_click(box: EditorSpinSlider, value: float) -> void:
+	box.value_focus_entered.connect(_watch_box_text.bind(box, value))
+	_find_class_typed(box, TextureRect).gui_input.connect(_on_box_knob_input.bind(box, value))
 
 
-func _on_speed_text_input(event: InputEvent, text: LineEdit) -> void:
+func _watch_box_text(box: EditorSpinSlider, value: float) -> void:
+	var text: LineEdit = _find_class_typed(box, LineEdit)
+	if text and not text.gui_input.is_connected(_on_box_text_input):
+		text.gui_input.connect(_on_box_text_input.bind(text, value))
+
+
+func _on_box_text_input(event: InputEvent, text: LineEdit, value: float) -> void:
 	var mb := event as InputEventMouseButton
 	if mb and mb.button_index == MOUSE_BUTTON_LEFT and mb.pressed and mb.double_click:
 		text.accept_event()
-		text.text = "1"
+		text.text = str(value)
 		text.text_submitted.emit(text.text) # the box's own handler closes the field
 
 
 ## On the slider's knob the second click starts a drag, which would put the value
 ## back with the slightest movement, so the reset waits for the button to go up.
-func _on_speed_knob_input(event: InputEvent) -> void:
+func _on_box_knob_input(event: InputEvent, box: EditorSpinSlider, value: float) -> void:
 	var mb := event as InputEventMouseButton
 	if mb == null or mb.button_index != MOUSE_BUTTON_LEFT:
 		return
 	if mb.pressed:
-		_speed_knob_double = mb.double_click
-	elif _speed_knob_double:
-		_speed_knob_double = false
-		_speed_box.value = 1.0
+		_knob_double = mb.double_click
+	elif _knob_double:
+		_knob_double = false
+		box.value = value
 
 
 func _set_fps_mode(on: bool) -> void:
